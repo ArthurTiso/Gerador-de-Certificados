@@ -7,6 +7,9 @@ Em vez de editar cada certificado manualmente, o sistema insere automaticamente 
 
 Seus resultados podem ser exportados como PDF individuais ou um único PDF para impressão.
 
+<img width="1780" height="937" alt="image" src="https://github.com/user-attachments/assets/29321f72-ae03-4a6f-bb74-ce97b8261041" />
+
+
 ---
 
 ## Como funciona
