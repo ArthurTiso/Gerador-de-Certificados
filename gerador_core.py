@@ -14,6 +14,7 @@ import io
 import os
 import zipfile
 from dataclasses import dataclass
+from functools import lru_cache
 
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
@@ -37,8 +38,9 @@ def listar_fontes(pasta="fonts"):
     )
 
 
+@lru_cache(maxsize=512)
 def load_font(font_path, size):
-    """Tenta carregar a fonte especificada. Se falhar, tenta Arial. Se falhar novamente, usa a fonte padrão."""
+    """Guarda em cache as fontes já abertas. Tenta carregar a fonte especificada. Se falhar, tenta Arial. Se falhar novamente, usa a fonte padrão."""
     try:
         return ImageFont.truetype(font_path, size)
     except OSError:

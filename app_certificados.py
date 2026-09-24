@@ -26,6 +26,7 @@
 # The app lists the .ttf/.otf files inside the 'fonts/' folder. If none is found it tries Arial (arial.ttf)
 # and, as a last resort, Pillow's default font.
 
+import io
 import os
 from datetime import datetime
 
@@ -63,25 +64,10 @@ if "nomes_manuais" not in st.session_state:
 
 # Sidebar configs
 st.sidebar.header("Configurações")
-# Fontes disponíveis
-font_names = listar_fontes("fonts")
-if not font_names:
-    st.sidebar.warning("Nenhuma fonte encontrada na pasta 'fonts/'.")
-    FONT_PATH = FONTE_PADRAO
-else:
-    FONT_PATH = os.path.join("fonts", st.sidebar.selectbox("Selecione a fonte", font_names))
+# Espaço reservado para as configurações do texto. Elas são desenhadas mais abaixo,
+# dentro de um fragment, depois que o template e os nomes já foram carregados.
+config_container = st.sidebar.container()
 
-default_font_size = st.sidebar.slider("Tamanho de fonte (inicial)", min_value=20, max_value=180, value=48)
-max_width_pct = st.sidebar.slider("Largura máxima do nome (% da largura da imagem)", min_value=40, max_value=95, value=80)
-
-# Y position como prct em slider
-y_pos_pct = st.sidebar.slider("Posição vertical do nome", min_value=0, max_value=100, value=43)
-
-# X como slides tbm
-x_pos_pct = st.sidebar.slider("Posição horizontal do nome", 0, 100, 50)
-
-
-fix_size = st.sidebar.checkbox("Usar tamanho fixo para todos os nomes", value=True)
 gerar_pdf_unico = st.sidebar.checkbox("Gerar um único PDF com todos os certificados", value=False)
 
 # Define nome do arquivo
@@ -95,14 +81,51 @@ output_zip_name = st.sidebar.text_input(
 )
 st.session_state.output_zip_name = output_zip_name  # salva edição
 
-config = ConfigTexto(
-    font_path=FONT_PATH,
-    font_size=default_font_size,
-    max_width_pct=max_width_pct,
-    x_pct=x_pos_pct,
-    y_pct=y_pos_pct,
-    tamanho_fixo=fix_size,
-)
+
+@st.cache_data(show_spinner=False)
+def abrir_template(conteudo):
+    """Decodifica o template apenas uma vez por arquivo enviado."""
+    return Image.open(io.BytesIO(conteudo)).convert("RGBA")
+
+
+@st.fragment
+def configuracoes_texto(template, nome_preview, preview_placeholder):
+    """Configurações do texto + pré-visualização.
+
+    Por ser um fragment, mexer nestes controles recarrega apenas este trecho
+    (e a imagem de pré-visualização), e não a página inteira.
+    """
+    font_names = listar_fontes("fonts")
+    if not font_names:
+        st.warning("Nenhuma fonte encontrada na pasta 'fonts/'.")
+        font_path = FONTE_PADRAO
+    else:
+        font_path = os.path.join("fonts", st.selectbox("Selecione a fonte", font_names))
+
+    default_font_size = st.slider("Tamanho de fonte (inicial)", min_value=20, max_value=180, value=48)
+    max_width_pct = st.slider("Largura máxima do nome (% da largura da imagem)", min_value=40, max_value=95, value=80)
+
+    # Y position como prct em slider
+    y_pos_pct = st.slider("Posição vertical do nome", min_value=0, max_value=100, value=43)
+
+    # X como slides tbm
+    x_pos_pct = st.slider("Posição horizontal do nome", 0, 100, 50)
+
+    fix_size = st.checkbox("Usar tamanho fixo para todos os nomes", value=True)
+
+    config = ConfigTexto(
+        font_path=font_path,
+        font_size=default_font_size,
+        max_width_pct=max_width_pct,
+        x_pct=x_pos_pct,
+        y_pct=y_pos_pct,
+        tamanho_fixo=fix_size,
+    )
+    # Guarda a configuração para a geração dos certificados (fora do fragment)
+    st.session_state.config_texto = config
+
+    if template is not None:
+        preview_placeholder.image(renderizar_certificado(template, nome_preview, config), use_container_width=True)
 
 
 # Callbacks da lista manual
@@ -185,12 +208,13 @@ with col2:
     generate_btn = st.button("Gerar certificados")
 
 
-image = None
-if uploaded_image is not None:
-    image = Image.open(uploaded_image).convert("RGBA")
-    # Mostra o primeiro nome real da lista, quando houver
-    nome_preview = nomes[0] if nomes else NOME_EXEMPLO
-    preview_placeholder.image(renderizar_certificado(image, nome_preview, config), use_container_width=True)
+image = abrir_template(uploaded_image.getvalue()) if uploaded_image is not None else None
+# Mostra o primeiro nome real da lista, quando houver
+nome_preview = nomes[0] if nomes else NOME_EXEMPLO
+
+with config_container:
+    configuracoes_texto(image, nome_preview, preview_placeholder)
+config = st.session_state.config_texto
 
 
 if generate_btn:
