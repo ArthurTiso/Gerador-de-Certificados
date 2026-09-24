@@ -1,12 +1,14 @@
 # app_certificados.py
-# Streamlit app to generate certificates in PDF from a template image and an Excel (.xlsx) with a column named 'nome'.
+# Streamlit app to generate certificates in PDF from a template image and a list of names.
+# The names can come from a spreadsheet (.xlsx or .csv) with a column named 'nome',
+# or be typed one by one in the app.
 #
 # Requirements (put in requirements.txt):
 # streamlit
 # pillow
 # pandas
 # openpyxl
-# reportlab
+# PyPDF2
 #
 # How to run:
 # 1. Create a virtualenv and install requirements:
@@ -16,33 +18,56 @@
 # 2. Run the app:
 #    streamlit run app_certificados.py
 #
+# Structure:
+# - app_certificados.py -> interface (Streamlit)
+# - gerador_core.py     -> regras de negócio (nomes, renderização e exportação)
+#
 # Notes about fonts:
-# The script tries to use Arial (arial.ttf). On some systems Arial may not be available.
-# If you get an error about the font, place a TTF file (for example arial.ttf or a substitute) in the same
-# folder as the app, or adjust FONT_PATH variable below to a valid .ttf file path.
+# The app lists the .ttf/.otf files inside the 'fonts/' folder. If none is found it tries Arial (arial.ttf)
+# and, as a last resort, Pillow's default font.
+
+import os
+from datetime import datetime
 
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
-import pandas as pd
-import io
-import zipfile
-import os
-import tempfile
-from datetime import datetime
-import glob
+from PIL import Image
+
+from gerador_core import (
+    ConfigTexto,
+    EXTENSOES_PLANILHA,
+    FONTE_PADRAO,
+    exportar_pdf_unico,
+    exportar_zip,
+    gerar_pdfs,
+    ler_nomes_planilha,
+    listar_fontes,
+    normalizar_nomes,
+    renderizar_certificado,
+)
+
 st.set_page_config(page_title="Gerador de Certificados", layout="wide")
 
 st.title("Gerador de Certificados")
-st.write("Faça upload do template (PNG/JPG) e do Excel (.xlsx) com coluna a 'nome', seguida dos nomes que deseja")
+st.write(
+    "Faça upload do template (PNG/JPG) e escolha como informar os nomes: "
+    "por uma planilha (.xlsx ou .csv) com a coluna 'nome', ou digitando um por um."
+)
+
+ORIGEM_PLANILHA = "Planilha (.xlsx / .csv)"
+ORIGEM_MANUAL = "Digitar manualmente"
+NOME_EXEMPLO = "Nome Inserido"
+
+# Estado da lista de nomes digitados (persiste entre as execuções do Streamlit)
+if "nomes_manuais" not in st.session_state:
+    st.session_state.nomes_manuais = []
 
 # Sidebar configs
 st.sidebar.header("Configurações")
 # Fontes disponíveis
-font_files = glob.glob("fonts/*.ttf")
-font_names = [os.path.basename(f) for f in font_files]
-if not font_files:
+font_names = listar_fontes("fonts")
+if not font_names:
     st.sidebar.warning("Nenhuma fonte encontrada na pasta 'fonts/'.")
-    FONT_PATH = "arial.ttf"
+    FONT_PATH = FONTE_PADRAO
 else:
     FONT_PATH = os.path.join("fonts", st.sidebar.selectbox("Selecione a fonte", font_names))
 
@@ -64,15 +89,91 @@ if "output_zip_name" not in st.session_state:
     st.session_state.output_zip_name = f"certificados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
 
 output_zip_name = st.sidebar.text_input(
-    "Nome do arquivo de saída", 
+    "Nome do arquivo de saída",
     value=st.session_state.output_zip_name,
     key="zip_name_input"
 )
 st.session_state.output_zip_name = output_zip_name  # salva edição
 
+config = ConfigTexto(
+    font_path=FONT_PATH,
+    font_size=default_font_size,
+    max_width_pct=max_width_pct,
+    x_pct=x_pos_pct,
+    y_pct=y_pos_pct,
+    tamanho_fixo=fix_size,
+)
 
-uploaded_image = st.file_uploader("Upload do template do certificado (PNG/JPG)", type=["png", "jpg", "jpeg"]) 
-uploaded_excel = st.file_uploader("Upload do arquivo Excel (.xlsx) com coluna 'nome'", type=["xlsx"]) 
+
+# Callbacks da lista manual
+
+def adicionar_nome():
+    """Adiciona o nome digitado à lista e limpa o campo (chamado ao apertar Enter ou 'Adicionar')."""
+    novos = normalizar_nomes([st.session_state.campo_nome])
+    if novos:
+        nome = novos[0]
+        if nome in st.session_state.nomes_manuais:
+            st.session_state.aviso_nome = f"'{nome}' já estava na lista e foi adicionado novamente."
+        st.session_state.nomes_manuais.append(nome)
+
+
+def remover_nome(indice):
+    st.session_state.nomes_manuais.pop(indice)
+
+
+def limpar_nomes():
+    st.session_state.nomes_manuais = []
+
+
+uploaded_image = st.file_uploader("Upload do template do certificado (PNG/JPG)", type=["png", "jpg", "jpeg"])
+
+origem = st.radio("Origem dos nomes", [ORIGEM_PLANILHA, ORIGEM_MANUAL], horizontal=True)
+
+# Cada origem só precisa produzir uma lista de nomes; o restante do fluxo é o mesmo.
+nomes = []
+erro_nomes = None
+
+if origem == ORIGEM_PLANILHA:
+    uploaded_sheet = st.file_uploader(
+        "Upload da planilha (.xlsx ou .csv) com coluna 'nome'", type=list(EXTENSOES_PLANILHA)
+    )
+    if uploaded_sheet is not None:
+        try:
+            nomes, aviso = ler_nomes_planilha(uploaded_sheet, uploaded_sheet.name)
+            if aviso:
+                st.warning(aviso)
+            st.caption(f"{len(nomes)} nome(s) encontrado(s) na planilha.")
+        except ValueError as e:
+            erro_nomes = str(e)
+            st.error(erro_nomes)
+else:
+    with st.form("form_nome", clear_on_submit=True, border=False):
+        col_campo, col_botao = st.columns([5, 1], vertical_alignment="bottom")
+        with col_campo:
+            st.text_input(
+                "Digite um nome e aperte Enter",
+                key="campo_nome",
+                placeholder="Ex.: Maria da Silva",
+            )
+        with col_botao:
+            st.form_submit_button("Adicionar", on_click=adicionar_nome, use_container_width=True)
+
+    if "aviso_nome" in st.session_state:
+        st.warning(st.session_state.pop("aviso_nome"))
+
+    nomes = list(st.session_state.nomes_manuais)
+    if nomes:
+        col_total, col_limpar = st.columns([5, 1], vertical_alignment="center")
+        col_total.caption(f"{len(nomes)} nome(s) na lista.")
+        col_limpar.button("Limpar lista", on_click=limpar_nomes, use_container_width=True)
+
+        with st.container(height=min(60 + 45 * len(nomes), 320)):
+            for i, nome in enumerate(nomes):
+                col_nome, col_remover = st.columns([12, 1], vertical_alignment="center")
+                col_nome.write(f"{i + 1}. {nome}")
+                col_remover.button("❌", key=f"remover_{i}", on_click=remover_nome, args=(i,), help="Remover")
+    else:
+        st.caption("Nenhum nome adicionado ainda.")
 
 # Duas colunas principais com as demais informações
 col1, col2 = st.columns(2)
@@ -84,176 +185,37 @@ with col2:
     generate_btn = st.button("Gerar certificados")
 
 
-
-# Utilities
-
-def load_font(path, size):
-    try:
-        return ImageFont.truetype(path, size)
-    except Exception:
-        try:
-            return ImageFont.truetype("arial.ttf", size)
-        except Exception:
-            return ImageFont.load_default()
-
-
-# Carregamento das fontes e configs delas
-
-def load_font(font_path, size):
-    """Tenta carregar a fonte especificada. Se falhar, tenta Arial. Se falhar novamente, usa a fonte padrão."""
-    try:
-        return ImageFont.truetype(font_path, size)
-    except OSError:
-        try:
-            return ImageFont.truetype("arial.ttf", size)
-        except OSError:
-            return ImageFont.load_default()
-
-
-def fit_text_to_width(draw, text, font_path, initial_font_size, max_width):
-    """Ajusta o tamanho da fonte para que o texto caiba na largura especificada."""
-    font_size = initial_font_size
-    while font_size > 1:
-        font = load_font(font_path, font_size)
-        try:
-            # Pillow 10+
-            bbox = draw.textbbox((0, 0), text, font=font)
-            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except AttributeError:
-            # Pillow <10
-            w, h = draw.textsize(text, font=font)
-
-        if w <= max_width:
-            return font, (w, h)
-        font_size -= 1
-    return font, (w, h)
-
-
-
+image = None
 if uploaded_image is not None:
     image = Image.open(uploaded_image).convert("RGBA")
-    base_preview = image.copy().convert("RGBA")
-    draw_prev = ImageDraw.Draw(base_preview)
-    W, H = base_preview.size
-
-    # Texto de exemplo
-    exemplo_nome = "Nome Inserido"
-    y_prev = int(H * (y_pos_pct / 100.0))
-    max_w_prev = int(W * (max_width_pct / 100.0))
-
-    if fix_size:
-        font_prev = load_font(FONT_PATH or "arial.ttf", default_font_size)
-        bbox = draw_prev.textbbox((0, 0), exemplo_nome, font=font_prev)
-        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    else:
-        font_prev, (text_w, text_h) = fit_text_to_width(
-            draw_prev, exemplo_nome, FONT_PATH if FONT_PATH.strip() != "" else "arial.ttf",
-            default_font_size, max_w_prev
-        )
-
-    x_prev = int(W * (x_pos_pct / 100.0)) - (text_w // 2)
-    draw_prev.text((x_prev, y_prev), exemplo_nome, font=font_prev, fill=(0, 0, 0, 255))
-
-    preview_placeholder.image(base_preview, use_container_width=True)
+    # Mostra o primeiro nome real da lista, quando houver
+    nome_preview = nomes[0] if nomes else NOME_EXEMPLO
+    preview_placeholder.image(renderizar_certificado(image, nome_preview, config), use_container_width=True)
 
 
 if generate_btn:
-    if uploaded_image is None or uploaded_excel is None:
-        st.warning("Por favor envie o template e o arquivo Excel (.xlsx) antes de gerar.")
+    if image is None:
+        st.warning("Por favor envie o template antes de gerar.")
+    elif erro_nomes:
+        st.error(erro_nomes)
+    elif not nomes:
+        if origem == ORIGEM_PLANILHA:
+            st.warning("Envie uma planilha com pelo menos um nome válido antes de gerar.")
+        else:
+            st.warning("Adicione pelo menos um nome à lista antes de gerar.")
     else:
-        try:
-            df = pd.read_excel(uploaded_excel)
-        except Exception as e:
-            st.error(f"Erro ao ler o Excel: {e}")
-            st.stop()
+        # Geração dos certificados
+        with st.spinner(f"Gerando {len(nomes)} certificado(s)..."):
+            pdf_list = gerar_pdfs(image, nomes, config)
 
-        if 'nome' not in map(str.lower, df.columns):
-            # try to find a column that resembles 'nome'
-            cols_lower = [c.lower() for c in df.columns]
-            if 'nome' in cols_lower:
-                # nothing
-                pass
-            else:
-                st.error("O arquivo Excel precisa ter uma coluna chamada 'nome' (ou nome com caixa alta!).")
-                st.stop()
-
-        # Normaliza a coluna de nomes (Caso haja caps)
-        col_map = {c: c for c in df.columns}
-        selected_col = None
-        for c in df.columns:
-            if c.lower() == 'nome':
-                selected_col = c
-                break
-        if selected_col is None:
-            # fallback (Pega a primeira coluna)
-            selected_col = df.columns[0]
-            st.warning(f"A coluna 'nome' não foi encontrada. Usando a primeira coluna: {selected_col}")
-            
-        # corrige problemas em nomes, converte tudo para texto, removendo blank spaces, celulas vazias e por fim cria uma lista do python
-        nomes = df[selected_col].astype(str).str.strip().dropna().tolist()
-        
-        if len(nomes) == 0:
-            st.error("Nenhum nome válido encontrado no Excel.")
-            st.stop()
-
-        # Geração dos certificados 
-        pdf_list = []  # Armazena PDFs individuais em memória
-        
-        for idx, nome in enumerate(nomes, start=1):
-            base = image.copy().convert("RGBA")
-            draw = ImageDraw.Draw(base)
-            W, H = base.size
-        
-            y = int(H * (y_pos_pct / 100.0))
-            max_w = int(W * (max_width_pct / 100.0))
-        
-            # Fonte 
-            if fix_size:
-                font = load_font(FONT_PATH or "arial.ttf", default_font_size)
-                bbox = draw.textbbox((0, 0), nome, font=font)
-                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            else:
-                font, (text_w, text_h) = fit_text_to_width(
-                    draw, nome, FONT_PATH if FONT_PATH.strip() != "" else "arial.ttf",
-                    default_font_size, max_w
-                )
-        
-            x = int(W * (x_pos_pct / 100.0)) - (text_w // 2)
-        
-            # Texto 
-            draw.text((x, y), nome, font=font, fill=(0,0,0,255))
-        
-            # Salvar como PDF individual
-            out_rgb = base.convert('RGB')
-            pdf_bytes = io.BytesIO()
-            out_rgb.save(pdf_bytes, format='PDF', resolution=300)
-            pdf_bytes.seek(0)
-            pdf_list.append(pdf_bytes.read())
-        
         # --- Unir ou compactar ---
         if gerar_pdf_unico:
-            from PyPDF2 import PdfMerger
-            merger = PdfMerger()
-            for pdf_data in pdf_list:
-                merger.append(io.BytesIO(pdf_data))
-        
-            merged_pdf = io.BytesIO()
-            merger.write(merged_pdf)
-            merger.close()
-            merged_pdf.seek(0)
-        
+            merged_pdf = exportar_pdf_unico(pdf_list)
             st.success(f"Gerado um único PDF com {len(nomes)} certificados.")
             st.download_button("Baixar PDF único", data=merged_pdf, file_name="certificados_unificados.pdf", mime="application/pdf")
-        
+
         else:
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for idx, nome in enumerate(nomes, start=1):
-                    safe_name = "".join([c for c in nome if c.isalnum() or c in (' ', '-', '_')]).rstrip()
-                    filename = f"{idx:03d} - {safe_name}.pdf"
-                    zipf.writestr(filename, pdf_list[idx-1])
-            zip_buffer.seek(0)
-        
+            zip_buffer = exportar_zip(nomes, pdf_list)
             st.success(f"Gerados {len(nomes)} certificados — download pronto.")
             st.download_button("Baixar todos os PDFs (.zip)", data=zip_buffer, file_name=output_zip_name, mime='application/zip')
 
@@ -266,4 +228,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
